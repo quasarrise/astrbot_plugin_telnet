@@ -3,23 +3,31 @@ from astrbot.api.platform import Platform, AstrBotMessage, MessageMember, Platfo
 from astrbot.api.message_components import Plain
 from astrbot.api.platform import register_platform_adapter
 from .telnet_event import TelnetMessageEvent
-from astrbot.api import logger # 导入日志器
+from astrbot.api import logger  # 导入日志器
+
 
 @register_platform_adapter(
-    "telnet", 
-    "Telnet适配器", 
-    default_config_tmpl={"host": "0.0.0.0", "port": 2323, "encoding": "gbk"}
+    "telnet",
+    "Telnet适配器",
+    default_config_tmpl={"host": "0.0.0.0", "port": 2323, "encoding": "gbk"},
 )
 class TelnetAdapter(Platform):
-    # 使用你之前成功的参数签名
-    def __init__(self, context, platform_config: dict, event_queue, *args, **kwargs):
+    def __init__(
+        self,
+        platform_config: dict,
+        platform_settings: dict,
+        event_queue: asyncio.Queue,
+    ) -> None:
         super().__init__(platform_config, event_queue)
+        self.settings = platform_settings
         self.config = platform_config
         self.host = self.config.get("host", "0.0.0.0")
         self.port = int(self.config.get("port", 2323))
         self.encoding = self.config.get("encoding", "gbk").lower()
-        
-        logger.info(f"[Telnet] 适配器配置加载成功: Host={self.host}, Port={self.port}, Encoding={self.encoding}")
+
+        logger.info(
+            f"[Telnet] 适配器配置加载成功: Host={self.host}, Port={self.port}, Encoding={self.encoding}"
+        )
 
     def meta(self) -> PlatformMetadata:
         """
@@ -27,11 +35,11 @@ class TelnetAdapter(Platform):
         这些信息会被框架用于 WebUI 展示和后台统计。
         """
         return PlatformMetadata(
-            id="telnet", 
-            name="Telnet Gateway", 
-            description="允许通过 Telnet 协议连接的旧式终端设备", # 补全此参数
+            id="telnet",
+            name="Telnet Gateway",
+            description="允许通过 Telnet 协议连接的旧式终端设备",  # 补全此参数
             logo_path="./logo.png",
-            support_streaming_message=False
+            support_streaming_message=False,
         )
 
     async def process_to_llm(self, msg_str: str, writer):
@@ -40,19 +48,19 @@ class TelnetAdapter(Platform):
         """
         try:
             # 获取客户端信息（用于 session_id）
-            peer = writer.get_extra_info('peername')
+            peer = writer.get_extra_info("peername")
             client_ip = str(peer[0])
-    
+
             # 1. 构造符合 v4.24.2 要求的 AstrBotMessage
             abm = AstrBotMessage()
             abm.type = MessageType.FRIEND_MESSAGE
             abm.message_str = msg_str
-            abm.message = [Plain(text=msg_str)] 
+            abm.message = [Plain(text=msg_str)]
             abm.sender = MessageMember(user_id=client_ip, nickname=f"User_{peer[1]}")
             abm.session_id = client_ip
-            abm.platform_meta = self.meta() # 确保 meta() 里有 id, name, description
+            abm.platform_meta = self.meta()  # 确保 meta() 里有 id, name, description
             abm.message_id = str(int(asyncio.get_event_loop().time()))
-    
+
             # 2. 构造并提交事件
             # 这里的 TelnetMessageEvent 必须接收 writer，以便回复时能找到出口
             event = TelnetMessageEvent(
@@ -61,15 +69,15 @@ class TelnetAdapter(Platform):
                 platform_meta=abm.platform_meta,
                 session_id=abm.session_id,
                 client_writer=writer,
-                encoding=self.encoding
+                encoding=self.encoding,
             )
-            
+
             # 3. 正式进入 AI 逻辑池
             self.commit_event(event)
-    
+
         except Exception as e:
             logger.error(f"[Telnet] Process to LLM Error: {e}")
-            
+
     async def run(self):
         # 启动 Telnet 服务
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
@@ -78,50 +86,55 @@ class TelnetAdapter(Platform):
 
     async def handle_client(self, reader, writer):
         # 暂时关闭主动协商，防止超级终端显示乱码
-        # writer.write(bytes([255, 251, 1])) 
-        writer.write(f"Connected. [GBK Mode]\r\n> ".encode(self.encoding, errors='ignore'))
+        # writer.write(bytes([255, 251, 1]))
+        writer.write(
+            f"Connected. [{self.encoding.upper()} Mode]\r\n> ".encode(
+                self.encoding, errors="ignore"
+            )
+        )
         await writer.drain()
-    
+
         input_str = ""
-    
+
         while True:
             try:
                 char_bytes = await reader.read(1)
-                if not char_bytes: break
-    
+                if not char_bytes:
+                    break
+
                 # --- 新增：过滤 Telnet 协议指令 (以 255/0xff 开头) ---
-                if char_bytes == b'\xff':
+                if char_bytes == b"\xff":
                     # 读取接下来的两个指令字节并丢弃，不进入业务逻辑
                     await reader.read(2)
                     continue
-    
+
                 # 处理退格
-                if char_bytes in (b'\x08', b'\x7f'):
+                if char_bytes in (b"\x08", b"\x7f"):
                     if input_str:
                         last_char = input_str[-1]
                         input_str = input_str[:-1]
-                        
+
                         # 修正：针对超级终端简化擦除逻辑
                         # 很多旧终端对 \x08 的处理会自动跟随字符宽度
                         # 我们只发送一组退格序列，如果发现删不干净再微调
-                        writer.write(b'\x08 \x08') 
+                        writer.write(b"\x08 \x08")
                         await writer.drain()
                     continue
-    
+
                 # 处理回车
-                if char_bytes in (b'\r', b'\n'):
+                if char_bytes in (b"\r", b"\n"):
                     if not input_str.strip():
                         writer.write(b"\r\n> ")
                         await writer.drain()
                         continue
-                    
+
                     final_msg = input_str
                     input_str = ""
                     writer.write(b"\r\n[Wait...]\r\n")
                     await writer.drain()
                     await self.process_to_llm(final_msg, writer)
                     continue
-    
+
                 # --- 普通字符处理 ---
                 try:
                     # 尝试解码
@@ -133,13 +146,13 @@ class TelnetAdapter(Platform):
                     try:
                         char_text = char_bytes.decode(self.encoding)
                     except:
-                        continue # 彻底无法解码则忽略，防止 \ufffd 产生
-    
+                        continue  # 彻底无法解码则忽略，防止 \ufffd 产生
+
                 input_str += char_text
                 # 回显时增加 errors='ignore'，彻底杜绝 \ufffd 导致的编码崩溃
-                writer.write(char_text.encode(self.encoding, errors='ignore'))
+                writer.write(char_text.encode(self.encoding, errors="ignore"))
                 await writer.drain()
-    
+
             except Exception as e:
                 # 使用 logger 而不是 print，避免混淆
                 logger.error(f"[Telnet] Loop Error: {e}")
