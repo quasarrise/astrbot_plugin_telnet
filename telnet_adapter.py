@@ -58,7 +58,6 @@ class TelnetAdapter(Platform):
             abm.message = [Plain(text=msg_str)]
             abm.sender = MessageMember(user_id=client_ip, nickname=f"User_{peer[1]}")
             abm.session_id = client_ip
-            abm.platform_meta = self.meta()  # 确保 meta() 里有 id, name, description
             abm.message_id = str(int(asyncio.get_event_loop().time()))
 
             # 2. 构造并提交事件
@@ -66,7 +65,7 @@ class TelnetAdapter(Platform):
             event = TelnetMessageEvent(
                 message_str=msg_str,
                 message_obj=abm,
-                platform_meta=abm.platform_meta,
+                platform_meta=self.meta(),
                 session_id=abm.session_id,
                 client_writer=writer,
                 encoding=self.encoding,
@@ -142,7 +141,7 @@ class TelnetAdapter(Platform):
                 except UnicodeDecodeError:
                     # 多字节编码（如 UTF-8 需要 2~4 字节）
                     # 持续读取字节直到能成功解码或达到安全上限
-                    while len(char_bytes) < 6:  # UTF-8 最长 4 字节，留足余量
+                    while len(char_bytes) < 5:  # UTF-8 最长 4 字节，留足余量
                         more = await reader.read(1)
                         if not more:
                             break
