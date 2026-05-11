@@ -140,13 +140,21 @@ class TelnetAdapter(Platform):
                     # 尝试解码
                     char_text = char_bytes.decode(self.encoding)
                 except UnicodeDecodeError:
-                    # 可能是中文首字节，补读一个
-                    second_byte = await reader.read(1)
-                    char_bytes += second_byte
-                    try:
-                        char_text = char_bytes.decode(self.encoding)
-                    except:
-                        continue  # 彻底无法解码则忽略，防止 \ufffd 产生
+                    # 多字节编码（如 UTF-8 需要 2~4 字节）
+                    # 持续读取字节直到能成功解码或达到安全上限
+                    while len(char_bytes) < 6:  # UTF-8 最长 4 字节，留足余量
+                        more = await reader.read(1)
+                        if not more:
+                            break
+                        char_bytes += more
+                        try:
+                            char_text = char_bytes.decode(self.encoding)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    else:
+                        # 超过最大长度仍无法解码，丢弃这些字节
+                        continue
 
                 input_str += char_text
                 # 回显时增加 errors='ignore'，彻底杜绝 \ufffd 导致的编码崩溃
