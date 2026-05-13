@@ -9,7 +9,12 @@ from astrbot.api import logger  # 导入日志器
 @register_platform_adapter(
     "telnet",
     "Telnet适配器",
-    default_config_tmpl={"host": "0.0.0.0", "port": 2323, "encoding": "gbk"},
+    default_config_tmpl={
+        "host": "0.0.0.0",
+        "port": 2323,
+        "encoding": "gbk",
+        "password": "",
+    },
 )
 class TelnetAdapter(Platform):
     def __init__(
@@ -24,6 +29,7 @@ class TelnetAdapter(Platform):
         self.host = self.config.get("host", "0.0.0.0")
         self.port = int(self.config.get("port", 2323))
         self.encoding = self.config.get("encoding", "gbk").lower()
+        self.password = self.config.get("password", "").strip()
 
         logger.info(
             f"[Telnet] 适配器配置加载成功: Host={self.host}, Port={self.port}, Encoding={self.encoding}"
@@ -87,11 +93,43 @@ class TelnetAdapter(Platform):
         # 暂时关闭主动协商，防止超级终端显示乱码
         # writer.write(bytes([255, 251, 1]))
         writer.write(
-            f"Connected. [{self.encoding.upper()} Mode]\r\n> ".encode(
+            f"Connected. [{self.encoding.upper()} Mode]\r\n".encode(
                 self.encoding, errors="ignore"
             )
         )
         await writer.drain()
+
+        # --- Password authentication (if configured) ---
+        if self.password:
+            writer.write(b"Password: ")
+            await writer.drain()
+            pwd = ""
+            while True:
+                b = await reader.read(1)
+                if not b:
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                if b in (b"\r", b"\n"):
+                    break
+                if b in (b"\x08", b"\x7f"):
+                    pwd = pwd[:-1]
+                    continue
+                try:
+                    pwd += b.decode(self.encoding)
+                except UnicodeDecodeError:
+                    continue
+            if pwd.strip() != self.password:
+                writer.write(b"\r\nAccess denied.\r\n")
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return
+            writer.write(b"\r\nOK.\r\n> ")
+            await writer.drain()
+        else:
+            writer.write(b"> ")
+            await writer.drain()
 
         input_str = ""
 

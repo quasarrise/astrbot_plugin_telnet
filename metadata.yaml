@@ -1,7 +1,7 @@
 name: astrbot_plugin_telnet
 display_name: Telnet Gateway
 desc: 允许通过 Telnet 客户端与机器人对话
-version: 1.0.2
+version: 1.1.0
 author: quasarrise
 logo: logo.png
 repo: https://github.com/quasarrise/astrbot_plugin_telnet
