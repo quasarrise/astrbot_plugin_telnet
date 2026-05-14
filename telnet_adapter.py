@@ -110,6 +110,10 @@ class TelnetAdapter(Platform):
                     writer.close()
                     await writer.wait_closed()
                     return
+                # Filter Telnet IAC sequences (e.g. MobaXterm negotiation)
+                if b == b"\xff":
+                    await reader.read(2)
+                    continue
                 if b in (b"\r", b"\n"):
                     break
                 if b in (b"\x08", b"\x7f"):
