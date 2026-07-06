@@ -1,19 +1,62 @@
-# AstrBot Telnet Gateway
----
-Telnet是一个源于1969年的远古协议。在1980年代到1990年代，基于Telnet的BBS曾经风行一时，后来Telnet的功能基本被SSH取代，但是Telnet仍然像活化石一样存在于各种设备上。
+# AstrBot Telnet Gateway BBS
 
-因此，通过Telnet协议访问Astrbot网关，理论上你就可以在几乎一切能联网的设备上接入LLM，比如DOS、Win9x、Meego、Windows Mobile。
+Telnet是一个源于1969年的远古协议。1980~1990年代，基于Telnet的BBS曾经风行一时。
 
-<img width="640" height="480" alt="Monitor_1_20260515-175303-036" src="https://github.com/user-attachments/assets/35d2fa55-df95-4fc7-9d6a-030f5fd62379" />
+本插件把 AstrBot 变成了一个 **BBS 风格**的接入点——连上后看到的是经典 ASCII 界面、彩色菜单、命令导航。
 
 ## 核心特性
-- 远程回显。
-- 支持UTF-8、GBK、BIG5编码切换。
-- 支持设置登录密码。
 
-由于Telnet历史悠久，终端版本众多，无法一一测试，目前在mTCP（DOS）、超级终端（Windows9x）、Mobaxterm测试通过。
+- 🖥️ **BBS 界面** — ASCII 框线 + ANSI 16 色，经典味道
+- 📋 **主菜单** — 聊天 / 公告 / 关于 / 帮助 / 退出
+- 💬 **聊天模式** — 彩色 `[AI]` / `[You]` 气泡，`/menu` 随时返回
+- 🔐 **密码认证** — 可选，防陌生人
+- 🌐 **多编码** — UTF-8 / GBK / BIG5 自适应
+- ⌨️ **远程回显** — IAC 协商，Win11 telnet、MobaXterm 都能用
 
-## 注意事项
-- 由于Telnet没有加密机制，请避免在公网上暴露Telnet端口。
-- 老旧设备建议打开Astrbot分段功能，以免LLM回复太长导致假死、崩溃。
+## 截图预览
 
+```
+.--------------------------------------------.
+|         Welcome to AstrBot BBS              |
+|             Telnet Gateway                  |
+:--------------------------------------------:
+|  [1] Chat with AI                           |
+|  [2] Announcements                          |
+|  [3] About                                  |
+|  [4] Help                                   |
+|  [5] Exit                                   |
+:--------------------------------------------:
+            Select [1-5]:
+                 > _
+'--------------------------------------------'
+```
+
+## 配置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| 监听地址 | 0.0.0.0 | 监听所有接口 |
+| 端口 | 2323 | Telnet 服务端口 |
+| 编码 | gbk | 终端编码（GBK 兼容 Win9x 超级终端） |
+| 连接密码 | (空) | 留空不验证 |
+
+## 聊天命令
+
+| 命令 | 说明 |
+|------|------|
+| `/menu` | 返回主菜单 |
+| `/help` | 显示帮助 |
+| `/clear` | 清屏 |
+
+## 兼容性
+
+已测试终端：
+- **mTCP** (DOS) ✅
+- **超级终端** (Windows 9x) ✅
+- **MobaXterm** ✅
+- **Termius** ✅
+- **Windows 11 telnet** ✅ (需启用 Telnet 客户端)
+
+老旧设备建议开启 AstrBot 分段发送功能，避免长回复导致假死。
+
+> ⚠️ Telnet 没有加密机制，避免在公网上暴露端口。
