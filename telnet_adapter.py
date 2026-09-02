@@ -42,6 +42,9 @@ class TelnetAdapter(Platform):
         self.port = int(self.config.get("端口", self.config.get("port", 2323)))
         self.encoding = self.config.get("编码", self.config.get("encoding", "gbk")).lower()
         self.password = self.config.get("连接密码（留空则不验证）", self.config.get("password", "")).strip()
+        # Echo ownership is client-driven (see handle_client): server echoes only when
+        # the client asks via DO ECHO. Default OFF so local-echo clients stay single-echo.
+        self._server_echo = False
 
         logger.info(
             f"[Telnet] BBS mode loaded: Host={self.host}, Port={self.port}, "
@@ -68,40 +71,85 @@ class TelnetAdapter(Platform):
     async def _flush(self, writer):
         await writer.drain()
 
-    async def _wait_key(self, reader, writer):
-        """Wait for any key press and discard it (with IAC filtering)."""
+    # ── telnet protocol (RFC 854) handling ──────
+    # IAC = 0xff. Commands: WILL=0xfb WONT=0xfc DO=0xfd DONT=0xfe
+    #                           SB=0xfa  SE=0xf0
+    # Options we support: ECHO=1, SGA=3. Everything else is refused.
+
+    async def _read_chunk(self, reader) -> int | None:
+        """Read 1 raw byte from the socket; return int value or None on EOF."""
+        b = await reader.read(1)
+        if not b:
+            return None
+        return b[0]
+
+    async def _handle_iac(self, reader, writer=None):
+        """Parse one full telnet sequence whose leading 0xff was already consumed.
+        Always consumes the ENTIRE sequence — including SB...SE sub-negotiations —
+        so no negotiation bytes can ever leak into application input. Replies to
+        WILL/DO for options the BBS supports."""
+        cmd = await self._read_chunk(reader)
+        if cmd is None:
+            return
+        if cmd == 0xfa:  # SB — sub-negotiation, consume until IAC SE
+            while True:
+                nxt = await self._read_chunk(reader)
+                if nxt is None:
+                    return
+                if nxt == 0xff:  # IAC inside SB: SE (0xf0) ends it, IAC IAC is escaped data
+                    nxt2 = await self._read_chunk(reader)
+                    if nxt2 is None:
+                        return
+                    if nxt2 == 0xf0:  # SE
+                        return
+            # unreachable, kept for clarity
+        if cmd in (0xfb, 0xfc, 0xfd, 0xfe):  # WILL / WONT / DO / DONT
+            opt = await self._read_chunk(reader)
+            if opt is None:
+                return
+            self._respond_nego(cmd, opt, writer)
+            return
+        # 0xf0 (stray SE) or any other byte — ignore
+
+    def _respond_nego(self, cmd: int, opt: int, writer):
+        """Reply to a client WILL/DO. Echo is client-driven: the server keeps its own
+        echo OFF unless the client asks for it (DO ECHO)."""
+        if not writer:
+            return
+        if cmd == 0xfb:  # client WILL <opt>
+            if opt == 1:      # ECHO — client will echo locally, server must NOT echo
+                self._server_echo = False
+                writer.write(b"\xff\xfd\x01")  # DO ECHO (you do it, I won't)
+            elif opt == 3:    # SGA
+                writer.write(b"\xff\xfd\x03")  # DO SGA
+            else:
+                writer.write(bytes([0xff, 0xfc, opt]))  # WONT — unsupported
+        elif cmd == 0xfd:  # client DO <opt>
+            if opt == 1:      # ECHO — client asks the server to echo
+                self._server_echo = True
+                writer.write(b"\xff\xfb\x01")  # WILL ECHO
+            elif opt == 3:    # SGA
+                writer.write(b"\xff\xfb\x03")  # WILL SGA
+            else:
+                writer.write(bytes([0xff, 0xfe, opt]))  # WONT — unsupported
+        # WONT (0xfc) / DONT (0xfe): nothing to reply
+
+    async def _read_data_byte(self, reader, writer=None) -> bytes:
+        """Read the next *data* byte, transparently consuming & replying to any
+        telnet negotiation in the stream. Returns a length-1 `bytes`, or b"" on EOF.
+        All application loops must read through this — never `reader.read(1)` raw."""
         while True:
             b = await reader.read(1)
             if not b:
-                return
-            if b == b"\xff":
-                await self._filter_iac(reader, writer)
+                return b""
+            if b == b"\xff":  # IAC — handle full sequence, keep fetching
+                await self._handle_iac(reader, writer)
                 continue
-            return
+            return b
 
-    # ── IAC negotiation ─────────────────────────
-
-    async def _filter_iac(self, reader, writer=None):
-        """Parse and respond to incoming Telnet IAC negotiations."""
-        cmd = await reader.read(1)
-        if not cmd:
-            return
-        opt = await reader.read(1)
-        if not opt:
-            return
-        opt_byte = ord(opt)
-        if opt_byte == 1:  # ECHO
-            if cmd == b"\xfd":  # DO
-                if writer:
-                    writer.write(b"\xff\xfb\x01")  # WILL ECHO
-            elif cmd == b"\xfb":  # WILL (client says it will echo locally)
-                if writer:
-                    writer.write(b"\xff\xfe\x01")  # DONT ECHO
-                    writer.write(b"\xff\xfb\x01")  # WILL ECHO
-        elif opt_byte == 3:  # SUPPRESS_GO_AHEAD
-            if cmd == b"\xfd":  # DO
-                if writer:
-                    writer.write(b"\xff\xfb\x03")  # WILL SUPPRESS_GO_AHEAD
+    async def _wait_key(self, reader, writer):
+        """Wait for any single data key press and discard it."""
+        await self._read_data_byte(reader, writer)
 
     # ── password auth ───────────────────────────
 
@@ -114,12 +162,9 @@ class TelnetAdapter(Platform):
         await self._flush(writer)
         pwd = ""
         while True:
-            b = await reader.read(1)
+            b = await self._read_data_byte(reader, writer)
             if not b:
                 return False
-            if b == b"\xff":
-                await self._filter_iac(reader, writer)
-                continue
             if b in (b"\r", b"\n"):
                 break
             if b in (b"\x08", b"\x7f"):
@@ -166,10 +211,13 @@ class TelnetAdapter(Platform):
     # ── main connection handler ─────────────────
 
     async def handle_client(self, reader, writer):
-        # IAC proactive negotiation
-        writer.write(b"\xff\xfb\x01")  # WILL ECHO
-        writer.write(b"\xff\xfb\x03")  # WILL SUPPRESS_GO_AHEAD
-        await self._flush(writer)
+        # NO proactive IAC negotiation. Vintage clients (e.g. Mocha Telnet on PalmOS)
+        # simply render unsolicited IAC sequences as literal text ("HOST: IAC WILL
+        # TN_SUPPRESS_GA") and their state machine derails — menu input breaks and the
+        # session dies on the client's idle timeout. Let the client drive: it keeps its
+        # own local echo (Mocha has 回显 ON), and we take over echo only when the client
+        # explicitly requests it via DO ECHO (see _respond_nego → self._server_echo).
+        self._server_echo = False
 
         # Welcome
         self._write(writer, C_GREEN + f"Connected. [{self.encoding.upper()} Mode]" + R + _eol() * 2)
@@ -188,22 +236,26 @@ class TelnetAdapter(Platform):
         await writer.wait_closed()
 
     async def _menu_loop(self, reader, writer):
-        """BBS main menu loop."""
+        """BBS main menu loop. Reads selection keys via the IAC-safe reader.
+        Echoes the selection only if the server owns echo (client asked via DO ECHO)."""
         while True:
             self._write(writer, render_banner())
             await self._flush(writer)
 
-            b = await reader.read(1)
+            b = await self._read_data_byte(reader, writer)
             if not b:
-                break
-            if b == b"\xff":
-                await self._filter_iac(reader, writer)
-                continue
+                break  # disconnected
 
             try:
                 key = b.decode(self.encoding).strip().lower()
             except UnicodeDecodeError:
                 continue
+
+            # Echo the selection only when the server owns echo; otherwise the
+            # client does local echo and an extra echo would double it.
+            if self._server_echo:
+                self._write(writer, key)
+                await self._flush(writer)
 
             if key == "1":
                 await self._chat_loop(reader, writer)
@@ -229,16 +281,34 @@ class TelnetAdapter(Platform):
         self._write(writer, render_chat_intro())
         await self._flush(writer)
 
+        # Show the input prompt immediately (render_chat_intro does NOT include it) —
+        # otherwise a fresh session waits silently until the user hits bare Enter.
+        self._write(writer, C_GREEN + "[You]" + R + " > ")
+        await self._flush(writer)
+
         input_str = ""
+
+        # A line-buffered client sends the menu selection as "1\r"; the trailing CR/LF is
+        # still buffered here and would fire the empty-Enter branch → a spurious blank
+        # prompt right after entry. Peek briefly and swallow one leading CR/LF.
+        try:
+            lead = await asyncio.wait_for(
+                self._read_data_byte(reader, writer), timeout=0.2
+            )
+        except asyncio.TimeoutError:
+            lead = b""
+        if lead and lead not in (b"\r", b"\n"):
+            # Real first input char (char-mode client): fold it into the input line.
+            input_str += lead.decode(self.encoding, errors="ignore")
+            if self._server_echo:
+                writer.write(lead)
+                await self._flush(writer)
+
         while True:
             try:
-                b = await reader.read(1)
+                b = await self._read_data_byte(reader, writer)
                 if not b:
                     return  # disconnected
-
-                if b == b"\xff":
-                    await self._filter_iac(reader, writer)
-                    continue
 
                 # Backspace
                 if b in (b"\x08", b"\x7f"):
@@ -287,14 +357,12 @@ class TelnetAdapter(Platform):
                 try:
                     char_text = b.decode(self.encoding)
                 except UnicodeDecodeError:
+                    # Multi-byte char (GBK/UTF-8): keep pulling IAC-safe data bytes
                     char_bytes = b
                     while len(char_bytes) < 5:
-                        more = await reader.read(1)
+                        more = await self._read_data_byte(reader, writer)
                         if not more:
                             break
-                        if more == b"\xff":
-                            await self._filter_iac(reader, writer)
-                            continue
                         char_bytes += more
                         try:
                             char_text = char_bytes.decode(self.encoding)
@@ -307,8 +375,9 @@ class TelnetAdapter(Platform):
                         continue
 
                 input_str += char_text
-                writer.write(char_text.encode(self.encoding, errors="ignore"))
-                await self._flush(writer)
+                if self._server_echo:
+                    writer.write(char_text.encode(self.encoding, errors="ignore"))
+                    await self._flush(writer)
 
             except Exception as e:
                 logger.error(f"[Telnet] Chat loop error: {e}")
