@@ -101,11 +101,10 @@ def render_banner() -> str:
         _box_menu(1, "Chat with AI"),
         _box_menu(2, "Announcements"),
         _box_menu(3, "About"),
-        _box_menu(4, "Help"),
-        _box_menu(5, "Exit"),
+        _box_menu(4, "Exit"),
         _box_border(":", "-", ":"),
         "",
-        C_YELLOW + _center("Select [1-5]: ") + R + _eol(),
+        C_YELLOW + _center("Select [1-4]: ") + R + _eol(),
         C_WHITE + _center("> ", CONTENT_W - 4) + R,
     ])
 
@@ -117,7 +116,6 @@ def render_chat_intro() -> str:
         _box_title(f"{B}{C_GREEN}Chat Mode{R}"),
         _box_border(":", "-", ":"),
         _box_line(f"{C_YELLOW}/menu{R}  Return to main menu"),
-        _box_line(f"{C_YELLOW}/help{R}  Show commands"),
         _box_line(f"{C_YELLOW}/clear{R} Clear screen"),
         _box_border("'", "-", "'"),
     ])
@@ -130,31 +128,12 @@ def render_about() -> str:
         _box_title(f"{B}{C_CYAN}About{R}"),
         _box_border(":", "-", ":"),
         _box_line("AstrBot BBS Telnet Gateway"),
-        _box_line("Version 1.3.0"),
+        _box_line("Version 1.3.1"),
         _box_line("Author: quasarrise"),
         _box_line("License: MIT"),
         _box_border(":", "-", ":"),
         _box_line(f"{D}Talk to AI from vintage terminals.{R}"),
         _box_line(f"{D}Supports DOS / Win9x / macOS / Linux.{R}"),
-        _box_border(":", "-", ":"),
-        _box_line(f"{C_CYAN}{B}Press any key to return...{R}"),
-        _box_border("'", "-", "'"),
-    ])
-
-
-def render_help() -> str:
-    return _assemble([
-        _clr(),
-        _box_border(".", "-", "."),
-        _box_title(f"{B}{C_CYAN}Help{R}"),
-        _box_border(":", "-", ":"),
-        C_WHITE + _center("Chat Commands") + R + _eol(),
-        f"  {C_YELLOW}/menu{R}       Return to main menu" + _eol(),
-        f"  {C_YELLOW}/help{R}       Show this help" + _eol(),
-        f"  {C_YELLOW}/clear{R}      Clear the screen" + _eol(),
-        _box_hline(),
-        C_WHITE + _center("Connection Info") + R + _eol(),
-        f"  {D}Encoding: UTF-8{R}" + _eol(),
         _box_border(":", "-", ":"),
         _box_line(f"{C_CYAN}{B}Press any key to return...{R}"),
         _box_border("'", "-", "'"),

@@ -1,4 +1,5 @@
 import asyncio
+import socket
 from astrbot.api.platform import Platform, AstrBotMessage, MessageMember, PlatformMetadata, MessageType
 from astrbot.api.message_components import Plain
 from astrbot.api.platform import register_platform_adapter
@@ -10,7 +11,7 @@ from .bbs_render import (
     SCREEN_W, CONTENT_W,
     _clr, _eol, _center,
     render_banner, render_chat_intro, render_about,
-    render_help, render_announcements,
+    render_announcements,
 )
 
 
@@ -22,10 +23,42 @@ from .bbs_render import (
     "telnet",
     "Telnet适配器",
     default_config_tmpl={
+        "enable": False,
+        "id": "telnet",
         "监听地址": "0.0.0.0",
         "端口": 2323,
         "编码": "gbk",
         "连接密码（留空则不验证）": "",
+        "回声模式": "server",
+        "窗口宽度": 0,
+        "汉字后加空格": False,
+    },
+    config_metadata={
+        "监听地址": {"type": "string", "description": "监听地址", "hint": "建议保留 0.0.0.0"},
+        "端口": {"type": "number", "description": "监听端口"},
+        "编码": {
+            "type": "string",
+            "description": "汉字编码",
+            "options": ["gbk", "utf-8"],
+            "hint": "老式终端一般用 gbk；现代终端用 utf-8",
+        },
+        "连接密码（留空则不验证）": {"type": "string", "description": "连接密码", "hint": "留空则不验证"},
+        "回声模式": {
+            "type": "string",
+            "description": "回声模式",
+            "options": ["server", "client"],
+            "hint": "server=服务器回显(主流客户端支持)；client=客户端本地回显(用于不解析IAC的旧终端，请在终端中开启本地回显)",
+        },
+        "窗口宽度": {
+            "type": "number",
+            "description": "窗口宽度（列）",
+            "hint": "如果汉字在行尾截断产生乱码，请在此指定宽度。0=自动(用IAC上报的客户端宽度,不报退80)。",
+        },
+        "汉字后加空格": {
+            "type": "bool",
+            "description": "汉字后加空格",
+            "hint": "给按半宽渲染汉字的客户端每个汉字后补空格。",
+        },
     },
 )
 class TelnetAdapter(Platform):
@@ -42,13 +75,29 @@ class TelnetAdapter(Platform):
         self.port = int(self.config.get("端口", self.config.get("port", 2323)))
         self.encoding = self.config.get("编码", self.config.get("encoding", "gbk")).lower()
         self.password = self.config.get("连接密码（留空则不验证）", self.config.get("password", "")).strip()
-        # Echo ownership is client-driven (see handle_client): server echoes only when
-        # the client asks via DO ECHO. Default OFF so local-echo clients stay single-echo.
+        # 回声模式：server = 主动 IAC WILL ECHO + 无条件回显（服务器回显型客户端：
+        #   DOS mTCP/UCDOS、Win11、Termius 等不主动协商、靠服务器回显）
+        #   client = 客户端驱动回显，仅当客户端发 DO ECHO 才回显（Mocha PalmOS 等本地回显客户端）
+        self.echo_mode = self.config.get("回声模式", self.config.get("echo_mode", "server")).lower()
+        # 窗口宽度：>0 = 手动固定列宽；0 = 自动，用 IAC NAWS 协商的客户端真实宽度，
+        #   客户端不报则退回 80（DOS VGA 文本模式标准宽度，即 40 个汉字）。
+        self.window_width = int(self.config.get("窗口宽度", self.config.get("window_width", 0)))
+        # 每个连接的 NAWS 上报宽度（writer → width）
+        self._naws_width: dict = {}
+        # 汉字后加空格：给按半宽渲染汉字的客户端（Mocha/WM6）在每个 CJK 字符后补空格，
+        # 让汉字占满宽度可读；正常终端开这个会浪费半行宽，默认关。
+        # WebUI 可能把布尔存成字符串 "true"/"false"，必须正确解析，否则关不掉。
+        _pad_raw = self.config.get("汉字后加空格", self.config.get("cjk_pad", False))
+        if isinstance(_pad_raw, str):
+            self.cjk_pad = _pad_raw.strip().lower() not in ("", "false", "0", "off", "no")
+        else:
+            self.cjk_pad = bool(_pad_raw)
+        # Echo ownership: 默认 server 模式即服务器回显；client 模式下才按需协商。
         self._server_echo = False
 
         logger.info(
             f"[Telnet] BBS mode loaded: Host={self.host}, Port={self.port}, "
-            f"Encoding={self.encoding}"
+            f"Encoding={self.encoding}, EchoMode={self.echo_mode}"
         )
 
     def meta(self) -> PlatformMetadata:
@@ -92,6 +141,10 @@ class TelnetAdapter(Platform):
         if cmd is None:
             return
         if cmd == 0xfa:  # SB — sub-negotiation, consume until IAC SE
+            opt = await self._read_chunk(reader)
+            if opt is None:
+                return
+            payload = []
             while True:
                 nxt = await self._read_chunk(reader)
                 if nxt is None:
@@ -100,9 +153,17 @@ class TelnetAdapter(Platform):
                     nxt2 = await self._read_chunk(reader)
                     if nxt2 is None:
                         return
-                    if nxt2 == 0xf0:  # SE
-                        return
-            # unreachable, kept for clarity
+                    if nxt2 == 0xf0:  # SE — end of sub-negotiation
+                        break
+                    payload.append(0xff)  # escaped IAC → literal byte
+                else:
+                    payload.append(nxt)
+            # NAWS (RFC1073): opt==0x1f, payload = <w_hi> <w_lo> <h_hi> <h_lo>
+            if opt == 0x1f and len(payload) >= 4 and writer is not None:
+                width = (payload[0] << 8) | payload[1]
+                if width > 0:
+                    self._naws_width[writer] = width
+                    logger.info(f"[Telnet] NAWS width reported by client: {width}")
         if cmd in (0xfb, 0xfc, 0xfd, 0xfe):  # WILL / WONT / DO / DONT
             opt = await self._read_chunk(reader)
             if opt is None:
@@ -122,6 +183,8 @@ class TelnetAdapter(Platform):
                 writer.write(b"\xff\xfd\x01")  # DO ECHO (you do it, I won't)
             elif opt == 3:    # SGA
                 writer.write(b"\xff\xfd\x03")  # DO SGA
+            elif opt == 0x1f:    # NAWS — client offers to report window size
+                writer.write(b"\xff\xfd\x1f")  # DO NAWS (please report it)
             else:
                 writer.write(bytes([0xff, 0xfc, opt]))  # WONT — unsupported
         elif cmd == 0xfd:  # client DO <opt>
@@ -130,6 +193,8 @@ class TelnetAdapter(Platform):
                 writer.write(b"\xff\xfb\x01")  # WILL ECHO
             elif opt == 3:    # SGA
                 writer.write(b"\xff\xfb\x03")  # WILL SGA
+            elif opt == 0x1f:    # NAWS — client wants the server to accept window size
+                writer.write(b"\xff\xfb\x1f")  # WILL NAWS
             else:
                 writer.write(bytes([0xff, 0xfe, opt]))  # WONT — unsupported
         # WONT (0xfc) / DONT (0xfe): nothing to reply
@@ -148,8 +213,18 @@ class TelnetAdapter(Platform):
             return b
 
     async def _wait_key(self, reader, writer):
-        """Wait for any single data key press and discard it."""
-        await self._read_data_byte(reader, writer)
+        """Wait for a meaningful key press and discard it.
+
+        跳过控制字节（mTCP 回车是 CR+NUL，残留的 NUL/LF/CR 若被当成按键
+        会让"Press any key"的屏瞬间被吞掉）。直到拿到一个可打印键或断开。
+        """
+        while True:
+            b = await self._read_data_byte(reader, writer)
+            if not b:
+                return
+            if b[0] < 0x20 or b[0] == 0x7f:  # NUL/CR/LF/tab/backspace… 全部跳过
+                continue
+            return
 
     # ── password auth ───────────────────────────
 
@@ -184,6 +259,13 @@ class TelnetAdapter(Platform):
 
     # ── process to LLM ──────────────────────────
 
+    def _effective_width(self, writer):
+        """窗口宽度：手动值 > 0 优先；否则用 NAWS 协商的客户端宽度；再不报则退回 80。"""
+        if self.window_width > 0:
+            return self.window_width
+        nw = self._naws_width.get(writer)
+        return nw if nw else 80
+
     async def process_to_llm(self, msg_str: str, writer):
         try:
             peer = writer.get_extra_info("peername")
@@ -203,21 +285,41 @@ class TelnetAdapter(Platform):
                 session_id=abm.session_id,
                 client_writer=writer,
                 encoding=self.encoding,
+                wrap_width=self._effective_width(writer),
+                cjk_pad=self.cjk_pad,
             )
             self.commit_event(event)
+            logger.info(
+                f"[Telnet] event committed, session={abm.session_id}, "
+                f"msg_len={len(msg_str)} msg={msg_str!r}"
+            )
         except Exception as e:
             logger.error(f"[Telnet] Process to LLM Error: {e}")
 
     # ── main connection handler ─────────────────
 
     async def handle_client(self, reader, writer):
-        # NO proactive IAC negotiation. Vintage clients (e.g. Mocha Telnet on PalmOS)
-        # simply render unsolicited IAC sequences as literal text ("HOST: IAC WILL
-        # TN_SUPPRESS_GA") and their state machine derails — menu input breaks and the
-        # session dies on the client's idle timeout. Let the client drive: it keeps its
-        # own local echo (Mocha has 回显 ON), and we take over echo only when the client
-        # explicitly requests it via DO ECHO (see _respond_nego → self._server_echo).
+        # TCP_NODELAY：禁用 Nagle，避免服务器逐字符回显的小包被 Nagle+客户端延迟ACK
+        # 拖到几百 ms（局域网 ping 0ms 但回显 0.5~1s 的典型根因）。
+        try:
+            sock = writer.get_extra_info("socket")
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+        # Echo ownership per echo_mode:
+        #  - server (default): proactive IAC WILL ECHO + SGA at connect, server echoes everything.
+        #    Clients that don't negotiate or rely on server echo (DOS mTCP/UCDOS, Win11 telnet,
+        #    Termius, Windows telnet) get single server-side echo.
+        #  - client: no proactive IAC; server echoes only when the client explicitly requests it
+        #    via DO ECHO (for local-echo clients like Mocha PalmOS that would double-echo and even
+        #    render unsolicited IAC as literal text).
         self._server_echo = False
+        if self.echo_mode == "server":
+            writer.write(b"\xff\xfb\x01")  # IAC WILL ECHO
+            writer.write(b"\xff\xfb\x03")  # IAC WILL SUPPRESS_GO_AHEAD
+            writer.write(b"\xff\xfb\x1f")  # IAC WILL NAWS — 请求客户端上报窗口宽度(兼容客户端可用)
+            await writer.drain()
+            self._server_echo = True
 
         # Welcome
         self._write(writer, C_GREEN + f"Connected. [{self.encoding.upper()} Mode]" + R + _eol() * 2)
@@ -268,10 +370,6 @@ class TelnetAdapter(Platform):
                 await self._flush(writer)
                 await self._wait_key(reader, writer)
             elif key == "4":
-                self._write(writer, render_help())
-                await self._flush(writer)
-                await self._wait_key(reader, writer)
-            elif key == "5":
                 self._writeln(writer, C_YELLOW + "\rGoodbye!" + R)
                 await self._flush(writer)
                 break
@@ -331,13 +429,6 @@ class TelnetAdapter(Platform):
                     # Built-in commands
                     if cmd == "/menu":
                         return  # back to menu
-                    if cmd == "/help":
-                        self._write(writer, render_help())
-                        await self._flush(writer)
-                        await self._wait_key(reader, writer)
-                        self._write(writer, render_chat_intro())
-                        await self._flush(writer)
-                        continue
                     if cmd == "/clear":
                         self._write(writer, render_chat_intro())
                         await self._flush(writer)
@@ -354,6 +445,7 @@ class TelnetAdapter(Platform):
                     continue
 
                 # Normal character
+                char_text = ""
                 try:
                     char_text = b.decode(self.encoding)
                 except UnicodeDecodeError:
@@ -373,6 +465,10 @@ class TelnetAdapter(Platform):
                         self._write(writer, "?")
                         await self._flush(writer)
                         continue
+
+                # 过滤杂散控制字符（mTCP/DOS 回车是 CR+NUL 0d 00，NUL 等不能污染输入行）
+                if char_text and all(ord(c) < 32 for c in char_text):
+                    continue
 
                 input_str += char_text
                 if self._server_echo:
