@@ -39,8 +39,8 @@ from .bbs_render import (
         "编码": {
             "type": "string",
             "description": "汉字编码",
-            "options": ["gbk", "utf-8"],
-            "hint": "老式终端一般用 gbk；现代终端用 utf-8",
+            "options": ["gbk", "big5", "utf-8"],
+            "hint": "简中老终端用 gbk；繁中老终端用 big5；现代终端用 utf-8",
         },
         "连接密码（留空则不验证）": {"type": "string", "description": "连接密码", "hint": "留空则不验证"},
         "回声模式": {
@@ -94,6 +94,10 @@ class TelnetAdapter(Platform):
             self.cjk_pad = bool(_pad_raw)
         # Echo ownership: 默认 server 模式即服务器回显；client 模式下才按需协商。
         self._server_echo = False
+        # 监听 server 与常驻信号：run()/terminate() 配合管理优雅重载。
+        # 若不处理 terminate，AstrBot 改配置 reload 时旧实例会卡死（详见 run()）。
+        self._server = None
+        self._stop = None
 
         logger.info(
             f"[Telnet] BBS mode loaded: Host={self.host}, Port={self.port}, "
@@ -481,7 +485,34 @@ class TelnetAdapter(Platform):
 
     # ── server run ──────────────────────────────
 
+    async def terminate(self) -> None:
+        """AstrBot 改配置 reload 平台前会 await 此钩子。
+
+        只释放监听端口并通知 run() 让位，不强制断开任何已建立的连接——
+        server.close() 同步关监听 socket（立即释放端口，与活连接无关）；
+        已有 telnet 会话由各自 handler 协程继续服务，直到用户主动断开。
+
+        此前未实现该钩子：对 run() 用 server.serve_forever() 的旧实现，Python3.12
+        里 serve_forever 自身的 finally 会 `await wait_closed()`，被存活的连接拖住，
+        使 run task 的取消无法完成、reload 永久挂起 → WebUI 一切换配置就假死，
+        只能手动重载插件。run() 改用 Event 常驻后，取消/让位都能干净完成，
+        新实例可 bind 同一端口。活连接全程不断开。
+        """
+        if self._stop is not None:
+            self._stop.set()  # 让 run() 的常驻等待优雅让位
+        if self._server is not None:
+            self._server.close()  # 同步释放监听端口，立即返回，不阻塞 reload
+            self._server = None
+
     async def run(self):
+        # 不用 server.serve_forever()：Python3.12 里它自身的 finally 会
+        # `await wait_closed()`，被活连接拖住会让 run task 的取消无法完成、
+        # AstrBot 重载永久挂起。start_server 返回的 server 已自行启动 accept，
+        # 这里只需常驻等待 terminate() 信号，再同步 close 释放端口。
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        async with server:
-            await server.serve_forever()
+        self._server = server
+        self._stop = asyncio.Event()
+        try:
+            await self._stop.wait()
+        finally:
+            server.close()

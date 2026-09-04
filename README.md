@@ -1,35 +1,19 @@
-# AstrBot Telnet Gateway BBS
+# AstrBot Telnet Gateway
 
-Telnet是一个源于1969年的远古协议。1980~1990年代，基于Telnet的BBS曾经风行一时。
-
-本插件把 AstrBot 变成了一个 **BBS 风格**的接入点——连上后看到的是经典 ASCII 界面、彩色菜单、命令导航。
+当下的 AI 应用和网页版无法支持比较陈旧的系统，而 Telnet 是一个源于1969年，一直被广泛支持的长寿协议。本插件使 DOS、Win9x、黑莓、Palm 等老系统可以通过 Telnet 体验 AI 对话。
 
 ## 核心特性
 
-- 🖥️ **BBS 界面** — ASCII 框线 + ANSI 16 色，经典味道
-- 📋 **主菜单** — 聊天 / 公告 / 关于 / 帮助 / 退出
-- 💬 **聊天模式** — 彩色 `[AI]` / `[You]` 气泡，`/menu` 随时返回
+- 🖥️ **BBS 界面** — ASCII 框线 + ANSI 16 色，模仿 90 年代 BBS 经典味道
 - 🔐 **密码认证** — 可选，防陌生人
-- 🌐 **编码可配置** — 默认 GBK（兼容 Win9x 超级终端），UTF-8 / BIG5 可在配置里切换
-- ⌨️ **健壮的回显** — 完整 RFC854 IAC 解析（含子协商），默认客户端本地回显、按需处理 ECHO/DO，兼容各类古董终端
+- 🌐 **编码可配置** — 默认 GBK（兼容 Win9x 等老系统），UTF-8 可在配置里切换
+- ⌨️ **兼容古董终端** — 回显、行宽等可手动配置以兼容古董终端
 
 ## 截图预览
 
-```
-.--------------------------------------------.
-|         Welcome to AstrBot BBS              |
-|             Telnet Gateway                  |
-:--------------------------------------------:
-|  [1] Chat with AI                           |
-|  [2] Announcements                          |
-|  [3] About                                  |
-|  [4] Help                                   |
-|  [5] Exit                                   |
-:--------------------------------------------:
-            Select [1-5]:
-                 > _
-'--------------------------------------------'
-```
+![mTCP Telnet on DOS/CCDOS](assets/DOS.jpg)
+
+![Mocha Telnet on PalmOS](assets/PALM.jpg)
 
 ## 配置
 
@@ -37,27 +21,22 @@ Telnet是一个源于1969年的远古协议。1980~1990年代，基于Telnet的B
 |------|--------|------|
 | 监听地址 | 0.0.0.0 | 监听所有接口 |
 | 端口 | 2323 | Telnet 服务端口 |
-| 编码 | gbk | 终端编码（GBK 兼容 Win9x 超级终端） |
+| 汉字编码 | gbk | 简中老终端 gbk；繁中老终端 big5；现代 utf-8 |
 | 连接密码 | (空) | 留空不验证 |
-
-## 聊天命令
-
-| 命令 | 说明 |
-|------|------|
-| `/menu` | 返回主菜单 |
-| `/help` | 显示帮助 |
-| `/clear` | 清屏 |
+| 回声模式  | server | server = 开启IAC，服务器回显（推荐）；client = 关闭IAC，需在终端中开启本地回显 |
+| 窗口宽度 | 0 | 如果IAC未能获取窗口宽度导致行尾汉字被截断，可在此手动指定宽度 |
+| 汉字后加空格  | 关 | 改善以半宽显示汉字的旧终端可读性 |
 
 ## 兼容性
 
 已测试终端：
-- **mTCP** (DOS) ✅
+- **mTCP Telnet** (DOS) ✅
 - **超级终端** (Windows 9x) ✅
-- **MobaXterm** ✅
-- **Termius** ✅
+- **Termius** (Android) ✅
 - **Windows 11 telnet** ✅ (需启用 Telnet 客户端)
-- **PalmTelnet 0.41** (PalmOS、PHEM 模拟器) ✅ 中文收发正常
-- **Mocha Telnet** (PalmOS 真机 / PHEM) ✅ 菜单导航可用（字符模式需按回车确认）
+- **MochaTelnet** (PalmOS) ✅ 不能输入和显示中文
+- **PocketPutty** (WM6) ✅ 不能输入和显示中文
+- **ConnectBot**(BBOS10) ✅ 物理键盘不能输入中文
 
 老旧设备建议开启 AstrBot 分段发送功能，避免长回复导致假死。
 
